@@ -1,6 +1,6 @@
 /**
- * SEC EDGAR Data Collector - BULLETPROOF VERSION
- * Verifies form type from actual page content, not RSS categories
+ * SEC EDGAR Data Collector - SIMPLE VERSION
+ * Trust the RSS feed, try to parse, skip if it fails
  */
 
 import { parseForm4XML } from '../utils/xml-parser.js';
@@ -26,39 +26,27 @@ export async function collectInsiderData(db) {
 
     const xmlText = await response.text();
     
-    // Extract ALL URLs from RSS feed (we'll verify form type later)
-    const indexURLs = extractAllURLs(xmlText);
+    // Extract URLs from RSS feed
+    const indexURLs = extractURLs(xmlText);
     console.log(`Found ${indexURLs.length} URLs in RSS feed`);
 
     let processed = 0;
     let errors = 0;
-    let skipped = 0;
 
-    // Process each URL (limit to 20 per run to avoid timeout)
+    // Process each URL (limit to 20 per run)
     for (const indexUrl of indexURLs.slice(0, 20)) {
       try {
-        const wasProcessed = await processForm4(indexUrl, db);
-        if (wasProcessed) {
-          processed++;
-        } else {
-          skipped++;
-        }
+        await processForm4(indexUrl, db);
+        processed++;
       } catch (error) {
         console.error(`Error processing ${indexUrl}:`, error.message);
         errors++;
       }
     }
 
-    // Update scores for all companies
-    await updateAllScores(db);
-
-    // Detect cluster buys
-    await detectClusterBuys(db);
-
     return {
       success: true,
       processed,
-      skipped,
       errors,
       timestamp: new Date().toISOString()
     };
@@ -73,7 +61,7 @@ export async function collectInsiderData(db) {
   }
 }
 
-function extractAllURLs(xmlText) {
+function extractURLs(xmlText) {
   const urls = [];
   const linkRegex = /<link\s+rel="alternate"[^>]*href="([^"]*)"/g;
   let match;
@@ -102,49 +90,35 @@ async function processForm4(indexUrl, db) {
 
   const indexHtml = await indexResponse.text();
 
-  // Step 2: VERIFY THIS IS ACTUALLY A FORM 4!
-  // Check the page title or form type in the content
-  const titleMatch = indexHtml.match(/<title>([^<]*)<\/title>/i);
-  const formTypeMatch = indexHtml.match(/Form\s+(\d+[A-Z]*)\s*-/i);
+  // Step 2: Find XML file link
+  // Look for common Form 4 XML patterns
+  let xmlFileName = null;
   
-  if (titleMatch) {
-    const title = titleMatch[1];
-    // If title doesn't contain "Form 4" or contains other form numbers, skip it
-    if (!title.includes('Form 4') && !title.includes('form 4')) {
-      console.log(`Skipping non-Form-4: ${title}`);
-      return false; // Not a Form 4, skip it
-    }
-  }
-  
-  if (formTypeMatch && formTypeMatch[1] !== '4') {
-    console.log(`Skipping Form ${formTypeMatch[1]}`);
-    return false; // Not a Form 4, skip it
-  }
-
-  // Step 3: Extract XML file link from index page
-  // Form 4 XML files are usually named like "wf-form4_*.xml" or "doc4.xml" or similar
-  const xmlLinkMatch = indexHtml.match(/<a[^>]*href="([^"]*(?:form4|doc4|ownership)[^"]*\.xml)"[^>]*>/i);
-  
-  if (!xmlLinkMatch) {
-    // Try alternative pattern - any XML file
-    const anyXmlMatch = indexHtml.match(/<a[^>]*href="([^"]*\.xml)"[^>]*>/i);
-    if (!anyXmlMatch) {
-      throw new Error('No XML file found in index page');
-    }
-    
-    // Check if this XML is the ownership document by looking at the link text or nearby content
-    const xmlFileName = anyXmlMatch[1];
-    if (xmlFileName.includes('filingfees') || xmlFileName.includes('ex-')) {
-      console.log(`Skipping non-ownership XML: ${xmlFileName}`);
-      return false;
+  // Try pattern 1: wf-form4_*.xml or doc4.xml
+  let match = indexHtml.match(/<a[^>]*href="([^"]*(?:wf-form4|doc4|primary_doc)[^"]*\.xml)"[^>]*>/i);
+  if (match) {
+    xmlFileName = match[1];
+  } else {
+    // Try pattern 2: any XML file that's not filing fees or exhibits
+    const allXmlMatches = indexHtml.matchAll(/<a[^>]*href="([^"]*\.xml)"[^>]*>/gi);
+    for (const m of allXmlMatches) {
+      const filename = m[1];
+      // Skip filing fees and exhibits
+      if (!filename.includes('filingfees') && !filename.includes('ex-') && !filename.includes('exhibit')) {
+        xmlFileName = filename;
+        break;
+      }
     }
   }
 
-  const xmlFileName = xmlLinkMatch ? xmlLinkMatch[1] : indexHtml.match(/<a[^>]*href="([^"]*\.xml)"[^>]*>/i)[1];
+  if (!xmlFileName) {
+    throw new Error('No XML file found in index page');
+  }
+
   const baseUrl = indexUrl.substring(0, indexUrl.lastIndexOf('/') + 1);
   const xmlUrl = baseUrl + xmlFileName;
 
-  // Step 4: Fetch the XML file
+  // Step 3: Fetch the XML file
   const xmlResponse = await fetch(xmlUrl, {
     headers: {
       'User-Agent': 'InsiderTrackerApp/1.0 (https://insider-tracker-frontend.vercel.app; ozgurakbas@example.com)'
@@ -157,28 +131,25 @@ async function processForm4(indexUrl, db) {
 
   const xmlContent = await xmlResponse.text();
   
-  // Step 5: Verify this is an ownership document XML
-  if (!xmlContent.includes('<ownershipDocument>') && !xmlContent.includes('ownershipDocument')) {
-    console.log('Skipping non-ownership XML');
-    return false;
+  // Step 4: Check if it's an ownership document
+  if (!xmlContent.includes('ownershipDocument')) {
+    throw new Error('Not an ownership document');
   }
 
-  // Step 6: Parse the Form 4 XML
+  // Step 5: Parse the Form 4 XML
   const data = parseForm4XML(xmlContent);
 
-  if (!data) {
-    throw new Error('Failed to parse Form 4 XML');
+  if (!data || !data.transactions || data.transactions.length === 0) {
+    throw new Error('No transactions found in Form 4');
   }
 
-  // Step 7: Store in database
+  // Step 6: Store in database
   const companyId = await upsertCompany(db, data.company);
   const insiderId = await upsertInsider(db, data.insider);
 
   for (const txn of data.transactions) {
     await insertTransaction(db, companyId, insiderId, txn, xmlUrl);
   }
-  
-  return true; // Successfully processed
 }
 
 async function upsertCompany(db, company) {
@@ -246,48 +217,5 @@ async function insertTransaction(db, companyId, insiderId, txn, form4Url) {
     txn.ownershipAfter || null,
     form4Url
   ).run();
-}
-
-async function updateAllScores(db) {
-  const companies = await db.prepare(
-    'SELECT id FROM companies'
-  ).all();
-
-  for (const company of companies.results) {
-    const transactions = await db.prepare(`
-      SELECT * FROM transactions 
-      WHERE company_id = ? 
-      AND filing_date >= date('now', '-30 days')
-    `).bind(company.id).all();
-
-    const score = calculateScore(transactions.results);
-
-    await db.prepare(
-      'UPDATE companies SET significance_score = ? WHERE id = ?'
-    ).bind(score, company.id).run();
-  }
-}
-
-async function detectClusterBuys(db) {
-  // Find companies with multiple insider purchases in the last 7 days
-  const clusters = await db.prepare(`
-    SELECT 
-      company_id,
-      COUNT(DISTINCT insider_id) as insider_count,
-      SUM(transaction_value) as total_value,
-      MAX(filing_date) as latest_filing
-    FROM transactions
-    WHERE is_purchase = 1
-    AND filing_date >= date('now', '-7 days')
-    GROUP BY company_id
-    HAVING insider_count >= 2
-  `).all();
-
-  // Mark these as cluster buys
-  for (const cluster of clusters.results) {
-    await db.prepare(
-      'UPDATE companies SET is_cluster_buy = 1 WHERE id = ?'
-    ).bind(cluster.company_id).run();
-  }
 }
 
