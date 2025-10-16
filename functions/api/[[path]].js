@@ -240,15 +240,18 @@ async function handleStats(db, corsHeaders) {
 // Trigger data collection
 async function handleCollect(db, corsHeaders) {
   try {
-    // This would normally trigger the SEC RSS collector
-    // For now, return a success message
+    const { collectInsiderData } = await import('../collectors/sec-collector.js');
+    const result = await collectInsiderData(db);
+    
     return jsonResponse({
-      message: 'Data collection triggered',
-      timestamp: new Date().toISOString(),
-    }, 200, corsHeaders);
+      message: result.success ? 'Data collection completed' : 'Data collection failed',
+      ...result
+    }, result.success ? 200 : 500, corsHeaders);
   } catch (error) {
+    console.error('Collection error:', error);
     return jsonResponse({
       error: 'Collection failed: ' + error.message,
+      timestamp: new Date().toISOString()
     }, 500, corsHeaders);
   }
 }
