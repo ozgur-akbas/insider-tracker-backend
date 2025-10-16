@@ -16,7 +16,7 @@ export async function collectInsiderData(db) {
     // Fetch RSS feed
     const response = await fetch(SEC_RSS_URL, {
       headers: {
-        'User-Agent': 'Insider Tracker App contact@insidertracker.com',
+        'User-Agent': 'InsiderTrackerApp/1.0 (https://insider-tracker-frontend.vercel.app; ozgurakbas@example.com)',
         'Accept': 'application/atom+xml'
       }
     });
@@ -89,7 +89,7 @@ async function processForm4(indexUrl, db) {
   // Step 1: Fetch the index page to find the XML file
   const indexResponse = await fetch(indexUrl, {
     headers: {
-      'User-Agent': 'Insider Tracker App contact@insidertracker.com'
+      'User-Agent': 'InsiderTrackerApp/1.0 (https://insider-tracker-frontend.vercel.app; ozgurakbas@example.com)'
     }
   });
 
@@ -116,7 +116,7 @@ async function processForm4(indexUrl, db) {
   // Step 4: Fetch the actual Form 4 XML
   const xmlResponse = await fetch(xmlUrl, {
     headers: {
-      'User-Agent': 'Insider Tracker App contact@insidertracker.com'
+      'User-Agent': 'InsiderTrackerApp/1.0 (https://insider-tracker-frontend.vercel.app; ozgurakbas@example.com)'
     }
   });
 
