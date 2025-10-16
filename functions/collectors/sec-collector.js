@@ -3,8 +3,8 @@
  * Fetches and parses Form 4 filings from SEC RSS feed
  */
 
-import { parseForm4XML } from '../utils/xml-parser';
-import { calculateScore } from '../utils/scoring';
+import { parseForm4XML } from '../utils/xml-parser.js';
+import { calculateScore } from '../utils/scoring.js';
 
 const SEC_RSS_URL = 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&count=100&output=atom';
 
@@ -69,12 +69,14 @@ export async function collectInsiderData(db) {
 
 function extractForm4URLs(xmlText) {
   const urls = [];
-  const entryRegex = /<link[^>]*href="([^"]*)"[^>]*rel="alternate"/g;
+  // Match <link rel="alternate" ... href="..." /> pattern
+  const entryRegex = /<link\s+rel="alternate"[^>]*href="([^"]*)"/g;
   let match;
 
   while ((match = entryRegex.exec(xmlText)) !== null) {
     const url = match[1];
-    if (url.includes('form4')) {
+    // All links in Form 4 feed are valid, no need to filter
+    if (url && url.includes('sec.gov')) {
       urls.push(url);
     }
   }
@@ -193,7 +195,7 @@ async function updateAllScores(db) {
     WHERE transaction_date >= date('now', '-30 days')
   `).all();
 
-  for (const { company_id } of companies.results) {
+  for (const { company_id } of companies.results || []) {
     await updateCompanyScore(db, company_id);
   }
 }
@@ -206,7 +208,7 @@ async function updateCompanyScore(db, companyId) {
     AND transaction_date >= date('now', '-30 days')
   `).bind(companyId).all();
 
-  if (transactions.length === 0) {
+  if (!transactions || transactions.length === 0) {
     return;
   }
 
@@ -259,7 +261,7 @@ async function detectClusterBuys(db) {
     HAVING COUNT(DISTINCT insider_id) >= 2
   `).all();
 
-  for (const cluster of clusters) {
+  for (const cluster of clusters || []) {
     // Check if cluster already exists
     const existing = await db.prepare(`
       SELECT id FROM cluster_buys
