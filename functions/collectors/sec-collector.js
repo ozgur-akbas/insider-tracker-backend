@@ -1,6 +1,6 @@
 /**
- * SEC EDGAR Data Collector - FIXED VERSION
- * Now properly filters for Form 4 filings only!
+ * SEC EDGAR Data Collector - BULLETPROOF VERSION
+ * Verifies form type from actual page content, not RSS categories
  */
 
 import { parseForm4XML } from '../utils/xml-parser.js';
@@ -26,18 +26,23 @@ export async function collectInsiderData(db) {
 
     const xmlText = await response.text();
     
-    // Parse RSS feed to get Form 4 index URLs (NOW PROPERLY FILTERED!)
-    const indexURLs = extractForm4URLs(xmlText);
-    console.log(`Found ${indexURLs.length} Form 4 filings`);
+    // Extract ALL URLs from RSS feed (we'll verify form type later)
+    const indexURLs = extractAllURLs(xmlText);
+    console.log(`Found ${indexURLs.length} URLs in RSS feed`);
 
     let processed = 0;
     let errors = 0;
+    let skipped = 0;
 
-    // Process each Form 4 (limit to 20 per run to avoid timeout)
+    // Process each URL (limit to 20 per run to avoid timeout)
     for (const indexUrl of indexURLs.slice(0, 20)) {
       try {
-        await processForm4(indexUrl, db);
-        processed++;
+        const wasProcessed = await processForm4(indexUrl, db);
+        if (wasProcessed) {
+          processed++;
+        } else {
+          skipped++;
+        }
       } catch (error) {
         console.error(`Error processing ${indexUrl}:`, error.message);
         errors++;
@@ -53,6 +58,7 @@ export async function collectInsiderData(db) {
     return {
       success: true,
       processed,
+      skipped,
       errors,
       timestamp: new Date().toISOString()
     };
@@ -67,25 +73,15 @@ export async function collectInsiderData(db) {
   }
 }
 
-function extractForm4URLs(xmlText) {
+function extractAllURLs(xmlText) {
   const urls = [];
-  
-  // Split into entries
-  const entries = xmlText.split('<entry>');
-  
-  for (const entry of entries) {
-    if (!entry.includes('</entry>')) continue;
-    
-    // Check if this entry is a Form 4 (not 424B5, etc.)
-    const categoryMatch = entry.match(/<category[^>]*term="([^"]*)"/);
-    if (!categoryMatch || categoryMatch[1] !== '4') {
-      continue; // Skip non-Form-4 entries
-    }
-    
-    // Extract the link
-    const linkMatch = entry.match(/<link\s+rel="alternate"[^>]*href="([^"]*)"/);
-    if (linkMatch && linkMatch[1]) {
-      urls.push(linkMatch[1]);
+  const linkRegex = /<link\s+rel="alternate"[^>]*href="([^"]*)"/g;
+  let match;
+
+  while ((match = linkRegex.exec(xmlText)) !== null) {
+    const url = match[1];
+    if (url && url.includes('sec.gov') && url.includes('-index.htm')) {
+      urls.push(url);
     }
   }
 
@@ -93,7 +89,7 @@ function extractForm4URLs(xmlText) {
 }
 
 async function processForm4(indexUrl, db) {
-  // Step 1: Fetch the index page to find the XML file
+  // Step 1: Fetch the index page
   const indexResponse = await fetch(indexUrl, {
     headers: {
       'User-Agent': 'InsiderTrackerApp/1.0 (https://insider-tracker-frontend.vercel.app; ozgurakbas@example.com)'
@@ -106,18 +102,49 @@ async function processForm4(indexUrl, db) {
 
   const indexHtml = await indexResponse.text();
 
-  // Step 2: Extract XML file link from index page
-  const xmlLinkMatch = indexHtml.match(/<a[^>]*href="([^"]*\.xml)"[^>]*>/i);
+  // Step 2: VERIFY THIS IS ACTUALLY A FORM 4!
+  // Check the page title or form type in the content
+  const titleMatch = indexHtml.match(/<title>([^<]*)<\/title>/i);
+  const formTypeMatch = indexHtml.match(/Form\s+(\d+[A-Z]*)\s*-/i);
   
-  if (!xmlLinkMatch) {
-    throw new Error('No XML file found in index page');
+  if (titleMatch) {
+    const title = titleMatch[1];
+    // If title doesn't contain "Form 4" or contains other form numbers, skip it
+    if (!title.includes('Form 4') && !title.includes('form 4')) {
+      console.log(`Skipping non-Form-4: ${title}`);
+      return false; // Not a Form 4, skip it
+    }
+  }
+  
+  if (formTypeMatch && formTypeMatch[1] !== '4') {
+    console.log(`Skipping Form ${formTypeMatch[1]}`);
+    return false; // Not a Form 4, skip it
   }
 
-  const xmlFileName = xmlLinkMatch[1];
+  // Step 3: Extract XML file link from index page
+  // Form 4 XML files are usually named like "wf-form4_*.xml" or "doc4.xml" or similar
+  const xmlLinkMatch = indexHtml.match(/<a[^>]*href="([^"]*(?:form4|doc4|ownership)[^"]*\.xml)"[^>]*>/i);
+  
+  if (!xmlLinkMatch) {
+    // Try alternative pattern - any XML file
+    const anyXmlMatch = indexHtml.match(/<a[^>]*href="([^"]*\.xml)"[^>]*>/i);
+    if (!anyXmlMatch) {
+      throw new Error('No XML file found in index page');
+    }
+    
+    // Check if this XML is the ownership document by looking at the link text or nearby content
+    const xmlFileName = anyXmlMatch[1];
+    if (xmlFileName.includes('filingfees') || xmlFileName.includes('ex-')) {
+      console.log(`Skipping non-ownership XML: ${xmlFileName}`);
+      return false;
+    }
+  }
+
+  const xmlFileName = xmlLinkMatch ? xmlLinkMatch[1] : indexHtml.match(/<a[^>]*href="([^"]*\.xml)"[^>]*>/i)[1];
   const baseUrl = indexUrl.substring(0, indexUrl.lastIndexOf('/') + 1);
   const xmlUrl = baseUrl + xmlFileName;
 
-  // Step 3: Fetch the XML file
+  // Step 4: Fetch the XML file
   const xmlResponse = await fetch(xmlUrl, {
     headers: {
       'User-Agent': 'InsiderTrackerApp/1.0 (https://insider-tracker-frontend.vercel.app; ozgurakbas@example.com)'
@@ -129,21 +156,29 @@ async function processForm4(indexUrl, db) {
   }
 
   const xmlContent = await xmlResponse.text();
+  
+  // Step 5: Verify this is an ownership document XML
+  if (!xmlContent.includes('<ownershipDocument>') && !xmlContent.includes('ownershipDocument')) {
+    console.log('Skipping non-ownership XML');
+    return false;
+  }
 
-  // Step 4: Parse the Form 4 XML
+  // Step 6: Parse the Form 4 XML
   const data = parseForm4XML(xmlContent);
 
   if (!data) {
     throw new Error('Failed to parse Form 4 XML');
   }
 
-  // Step 5: Store in database
+  // Step 7: Store in database
   const companyId = await upsertCompany(db, data.company);
   const insiderId = await upsertInsider(db, data.insider);
 
   for (const txn of data.transactions) {
     await insertTransaction(db, companyId, insiderId, txn, xmlUrl);
   }
+  
+  return true; // Successfully processed
 }
 
 async function upsertCompany(db, company) {
