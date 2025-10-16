@@ -36,9 +36,9 @@ export async function onRequest(context) {
     } else if (path === 'stats') {
       return await handleStats(env.DB, corsHeaders);
     } else if (path === 'collect') {
+      return await handleCollect(env.DB, corsHeaders);
     } else if (path === 'debug-collect') {
       return await handleDebugCollect(env.DB, corsHeaders);
-      return await handleCollect(env.DB, corsHeaders);
     }
 
     return jsonResponse({ error: 'Not found' }, 404, corsHeaders);
