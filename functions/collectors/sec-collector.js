@@ -1,6 +1,7 @@
 /**
- * SEC EDGAR Data Collector
+ * SEC EDGAR Data Collector - Version 2
  * Fetches and parses Form 4 filings from SEC RSS feed
+ * Updated to handle index pages and extract XML files
  */
 
 import { parseForm4XML } from '../utils/xml-parser.js';
@@ -26,20 +27,20 @@ export async function collectInsiderData(db) {
 
     const xmlText = await response.text();
     
-    // Parse RSS feed to get Form 4 URLs
-    const form4URLs = extractForm4URLs(xmlText);
-    console.log(`Found ${form4URLs.length} Form 4 filings`);
+    // Parse RSS feed to get Form 4 index URLs
+    const indexURLs = extractForm4URLs(xmlText);
+    console.log(`Found ${indexURLs.length} Form 4 filings`);
 
     let processed = 0;
     let errors = 0;
 
     // Process each Form 4 (limit to 20 per run to avoid timeout)
-    for (const url of form4URLs.slice(0, 20)) {
+    for (const indexUrl of indexURLs.slice(0, 20)) {
       try {
-        await processForm4(url, db);
+        await processForm4(indexUrl, db);
         processed++;
       } catch (error) {
-        console.error(`Error processing ${url}:`, error.message);
+        console.error(`Error processing ${indexUrl}:`, error.message);
         errors++;
       }
     }
@@ -84,34 +85,60 @@ function extractForm4URLs(xmlText) {
   return urls;
 }
 
-async function processForm4(url, db) {
-  // Fetch Form 4 XML
-  const response = await fetch(url, {
+async function processForm4(indexUrl, db) {
+  // Step 1: Fetch the index page to find the XML file
+  const indexResponse = await fetch(indexUrl, {
     headers: {
       'User-Agent': 'Insider Tracker App contact@insidertracker.com'
     }
   });
 
-  if (!response.ok) {
-    throw new Error(`Form 4 fetch failed: ${response.status}`);
+  if (!indexResponse.ok) {
+    throw new Error(`Index page fetch failed: ${indexResponse.status}`);
   }
 
-  const xmlText = await response.text();
+  const indexHtml = await indexResponse.text();
+  
+  // Step 2: Extract the XML file URL from the index page
+  // Look for links like: <a href="rdgdoc.xml">
+  const xmlLinkMatch = indexHtml.match(/<a[^>]*href="([^"]*\.xml)"[^>]*>/i);
+  
+  if (!xmlLinkMatch) {
+    console.log(`No XML file found in ${indexUrl}`);
+    return; // Skip if no XML file found
+  }
+
+  // Step 3: Construct the full XML URL
+  const xmlFileName = xmlLinkMatch[1];
+  const baseUrl = indexUrl.substring(0, indexUrl.lastIndexOf('/') + 1);
+  const xmlUrl = baseUrl + xmlFileName;
+
+  // Step 4: Fetch the actual Form 4 XML
+  const xmlResponse = await fetch(xmlUrl, {
+    headers: {
+      'User-Agent': 'Insider Tracker App contact@insidertracker.com'
+    }
+  });
+
+  if (!xmlResponse.ok) {
+    throw new Error(`Form 4 XML fetch failed: ${xmlResponse.status}`);
+  }
+
+  const xmlText = await xmlResponse.text();
+  
+  // Step 5: Parse the XML
   const data = parseForm4XML(xmlText);
 
   if (!data || !data.company || !data.insider || !data.transactions || data.transactions.length === 0) {
     return; // Skip if no valid data
   }
 
-  // Insert or get company
+  // Step 6: Insert into database
   const companyId = await upsertCompany(db, data.company);
-
-  // Insert or get insider
   const insiderId = await upsertInsider(db, data.insider);
 
-  // Insert transactions
   for (const txn of data.transactions) {
-    await insertTransaction(db, companyId, insiderId, txn, url);
+    await insertTransaction(db, companyId, insiderId, txn, xmlUrl);
   }
 }
 
