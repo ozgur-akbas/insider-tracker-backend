@@ -36,6 +36,8 @@ export async function onRequest(context) {
     } else if (path === 'stats') {
       return await handleStats(env.DB, corsHeaders);
     } else if (path === 'collect') {
+    } else if (path === 'debug-collect') {
+      return await handleDebugCollect(env.DB, corsHeaders);
       return await handleCollect(env.DB, corsHeaders);
     }
 
@@ -256,3 +258,18 @@ async function handleCollect(db, corsHeaders) {
   }
 }
 
+
+async function handleDebugCollect(db, corsHeaders) {
+  try {
+    const { collectInsiderDataDebug } = await import('../collectors/sec-collector-debug.js');
+    const result = await collectInsiderDataDebug(db);
+    
+    return jsonResponse(result, 200, corsHeaders);
+  } catch (error) {
+    console.error('Debug collection error:', error);
+    return jsonResponse({
+      error: 'Debug collection failed: ' + error.message,
+      timestamp: new Date().toISOString()
+    }, 500, corsHeaders);
+  }
+}
