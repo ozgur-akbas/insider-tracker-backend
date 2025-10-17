@@ -257,19 +257,49 @@ async function handleCollect(db, corsHeaders) {
     }, 500, corsHeaders);
   }
 }
-
-
 async function handleDebugCollect(db, corsHeaders) {
   try {
-    const { collectInsiderDataDebug } = await import('../collectors/sec-collector-debug.js');
+    const { collectInsiderDataDebug } = await import('../collectors/sec-collector-debug-detailed.js');
     const result = await collectInsiderDataDebug(db);
     
-    return jsonResponse(result, 200, corsHeaders);
+    // Return debug log as HTML for easy reading
+    const htmlLog = `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Debug Log</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #00ff00; }
+    pre { white-space: pre-wrap; line-height: 1.5; }
+    .error { color: #ff4444; }
+    .success { color: #44ff44; }
+  </style>
+</head>
+<body>
+  <h1>SEC Collector Debug Log</h1>
+  <pre>${result.debugLog ? result.debugLog.join('\n') : 'No debug log available'}</pre>
+  <hr>
+  <h2>Result:</h2>
+  <pre>${JSON.stringify(result, null, 2)}</pre>
+</body>
+</html>
+    `;
+    
+    return new Response(htmlLog, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html',
+        ...corsHeaders
+      }
+    });
   } catch (error) {
     console.error('Debug collection error:', error);
     return jsonResponse({
       error: 'Debug collection failed: ' + error.message,
+      stack: error.stack,
       timestamp: new Date().toISOString()
     }, 500, corsHeaders);
   }
 }
+
+
