@@ -1,12 +1,18 @@
 /**
- * SEC EDGAR Data Collector - SIMPLE VERSION
- * Trust the RSS feed, try to parse, skip if it fails
+ * SEC EDGAR Data Collector - PRODUCTION READY
+ * Tested and working - ready for deployment
+ * 
+ * Fixes applied:
+ * 1. Proper User-Agent with real email
+ * 2. Handle absolute XML paths (starting with /)
+ * 3. Remove XSL styling directory from XML paths
  */
 
 import { parseForm4XML } from '../utils/xml-parser.js';
 import { calculateScore } from '../utils/scoring.js';
 
 const SEC_RSS_URL = 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&count=100&output=atom';
+const USER_AGENT = 'InsiderTrackerApp/1.0 ozgur.akbas@tresteams.com';
 
 export async function collectInsiderData(db) {
   console.log('Starting SEC data collection...');
@@ -15,8 +21,7 @@ export async function collectInsiderData(db) {
     // Fetch RSS feed
     const response = await fetch(SEC_RSS_URL, {
       headers: {
-        'User-Agent': 'InsiderTrackerApp/1.0 ozgur.akbas@tresteams.com',
-
+        'User-Agent': USER_AGENT,
         'Accept': 'application/atom+xml'
       }
     });
@@ -32,23 +37,38 @@ export async function collectInsiderData(db) {
     console.log(`Found ${indexURLs.length} URLs in RSS feed`);
 
     let processed = 0;
+    let skipped = 0;
     let errors = 0;
 
     // Process each URL (limit to 20 per run)
     for (const indexUrl of indexURLs.slice(0, 20)) {
       try {
-        await processForm4(indexUrl, db);
-        processed++;
+        const result = await processForm4(indexUrl, db);
+        if (result.processed) {
+          processed++;
+          console.log(`✓ Processed: ${result.ticker} (${result.transactions} transactions)`);
+        } else {
+          skipped++;
+        }
+        
+        // Rate limiting: 150ms delay = ~6.6 req/sec (SEC limit is 10 req/sec)
+        await new Promise(resolve => setTimeout(resolve, 150));
+        
       } catch (error) {
         console.error(`Error processing ${indexUrl}:`, error.message);
         errors++;
       }
     }
 
+    console.log(`Collection complete: ${processed} processed, ${skipped} skipped, ${errors} errors`);
+
     return {
       success: true,
+      message: 'Data collection completed',
       processed,
+      skipped,
       errors,
+      total_urls: indexURLs.length,
       timestamp: new Date().toISOString()
     };
 
@@ -81,8 +101,7 @@ async function processForm4(indexUrl, db) {
   // Step 1: Fetch the index page
   const indexResponse = await fetch(indexUrl, {
     headers: {
-    'User-Agent': 'InsiderTrackerApp/1.0 ozgur.akbas@tresteams.com',
-
+      'User-Agent': USER_AGENT
     }
   });
 
@@ -91,9 +110,13 @@ async function processForm4(indexUrl, db) {
   }
 
   const indexHtml = await indexResponse.text();
+  
+  // Check if it's actually a Form 4
+  if (!indexHtml.includes('Form 4</strong>')) {
+    return { processed: false, reason: 'Not a Form 4' };
+  }
 
   // Step 2: Find XML file link
-  // Look for common Form 4 XML patterns
   let xmlFileName = null;
   
   // Try pattern 1: wf-form4_*.xml or doc4.xml
@@ -114,29 +137,34 @@ async function processForm4(indexUrl, db) {
   }
 
   if (!xmlFileName) {
-    throw new Error('No XML file found in index page');
+    return { processed: false, reason: 'No XML file found' };
   }
 
-  // FIX: Handle both absolute and relative XML paths
-let xmlUrl;
-if (xmlFileName.startsWith('/')) {
-  // Absolute path from SEC root
-  xmlUrl = 'https://www.sec.gov' + xmlFileName;
-} else if (xmlFileName.startsWith('http' )) {
-  // Full URL
-  xmlUrl = xmlFileName;
-} else {
-  // Relative path from index page directory
-  const baseUrl = indexUrl.substring(0, indexUrl.lastIndexOf('/') + 1);
-  xmlUrl = baseUrl + xmlFileName;
-}
+  // FIX 1: Remove XSL styling directory (returns HTML instead of XML)
+  xmlFileName = xmlFileName.replace(/\/xslF345X05\//, '/');
+  xmlFileName = xmlFileName.replace(/\/xslF345X04\//, '/');
+  xmlFileName = xmlFileName.replace(/\/xslF345X03\//, '/');
+  xmlFileName = xmlFileName.replace(/\/xslF345X02\//, '/');
+  xmlFileName = xmlFileName.replace(/\/xslF345X01\//, '/');
 
+  // FIX 2: Handle both absolute and relative XML paths
+  let xmlUrl;
+  if (xmlFileName.startsWith('/')) {
+    // Absolute path from SEC root
+    xmlUrl = 'https://www.sec.gov' + xmlFileName;
+  } else if (xmlFileName.startsWith('http')) {
+    // Full URL
+    xmlUrl = xmlFileName;
+  } else {
+    // Relative path from index page directory
+    const baseUrl = indexUrl.substring(0, indexUrl.lastIndexOf('/') + 1);
+    xmlUrl = baseUrl + xmlFileName;
+  }
 
   // Step 3: Fetch the XML file
   const xmlResponse = await fetch(xmlUrl, {
     headers: {
-      'User-Agent': 'InsiderTrackerApp/1.0 ozgur.akbas@tresteams.com',
-
+      'User-Agent': USER_AGENT
     }
   });
 
@@ -148,23 +176,31 @@ if (xmlFileName.startsWith('/')) {
   
   // Step 4: Check if it's an ownership document
   if (!xmlContent.includes('ownershipDocument')) {
-    throw new Error('Not an ownership document');
+    return { processed: false, reason: 'Not an ownership document' };
   }
 
   // Step 5: Parse the Form 4 XML
   const data = parseForm4XML(xmlContent);
 
   if (!data || !data.transactions || data.transactions.length === 0) {
-    throw new Error('No transactions found in Form 4');
+    return { processed: false, reason: 'No transactions found' };
   }
 
   // Step 6: Store in database
   const companyId = await upsertCompany(db, data.company);
   const insiderId = await upsertInsider(db, data.insider);
 
+  let transactionCount = 0;
   for (const txn of data.transactions) {
-    await insertTransaction(db, companyId, insiderId, txn, xmlUrl);
+    const inserted = await insertTransaction(db, companyId, insiderId, txn, xmlUrl);
+    if (inserted) transactionCount++;
   }
+
+  return {
+    processed: true,
+    ticker: data.company.ticker,
+    transactions: transactionCount
+  };
 }
 
 async function upsertCompany(db, company) {
@@ -210,7 +246,7 @@ async function insertTransaction(db, companyId, insiderId, txn, form4Url) {
   `).bind(companyId, insiderId, txn.date, txn.shares).first();
 
   if (existing) {
-    return; // Skip duplicate
+    return false; // Skip duplicate
   }
 
   await db.prepare(`
@@ -232,5 +268,6 @@ async function insertTransaction(db, companyId, insiderId, txn, form4Url) {
     txn.ownershipAfter || null,
     form4Url
   ).run();
-}
 
+  return true;
+}
