@@ -117,8 +117,20 @@ async function processForm4(indexUrl, db) {
     throw new Error('No XML file found in index page');
   }
 
+  // FIX: Handle both absolute and relative XML paths
+let xmlUrl;
+if (xmlFileName.startsWith('/')) {
+  // Absolute path from SEC root
+  xmlUrl = 'https://www.sec.gov' + xmlFileName;
+} else if (xmlFileName.startsWith('http' )) {
+  // Full URL
+  xmlUrl = xmlFileName;
+} else {
+  // Relative path from index page directory
   const baseUrl = indexUrl.substring(0, indexUrl.lastIndexOf('/') + 1);
-  const xmlUrl = baseUrl + xmlFileName;
+  xmlUrl = baseUrl + xmlFileName;
+}
+
 
   // Step 3: Fetch the XML file
   const xmlResponse = await fetch(xmlUrl, {
