@@ -1,11 +1,6 @@
 /**
- * SEC EDGAR Data Collector - PRODUCTION READY
- * Tested and working - ready for deployment
- * 
- * Fixes applied:
- * 1. Proper User-Agent with real email
- * 2. Handle absolute XML paths (starting with /)
- * 3. Remove XSL styling directory from XML paths
+ * SEC EDGAR Data Collector - FINAL WORKING VERSION
+ * Removes strict Form 4 HTML check - relies on ownershipDocument instead
  */
 
 import { parseForm4XML } from '../utils/xml-parser.js';
@@ -49,6 +44,7 @@ export async function collectInsiderData(db) {
           console.log(`✓ Processed: ${result.ticker} (${result.transactions} transactions)`);
         } else {
           skipped++;
+          console.log(`⊘ Skipped: ${result.reason}`);
         }
         
         // Rate limiting: 150ms delay = ~6.6 req/sec (SEC limit is 10 req/sec)
@@ -106,15 +102,10 @@ async function processForm4(indexUrl, db) {
   });
 
   if (!indexResponse.ok) {
-    throw new Error(`Failed to fetch index page: ${indexResponse.status}`);
+    return { processed: false, reason: `Index fetch failed: ${indexResponse.status}` };
   }
 
   const indexHtml = await indexResponse.text();
-  
-  // Check if it's actually a Form 4
-  if (!indexHtml.includes('Form 4</strong>')) {
-    return { processed: false, reason: 'Not a Form 4' };
-  }
 
   // Step 2: Find XML file link
   let xmlFileName = null;
@@ -169,12 +160,12 @@ async function processForm4(indexUrl, db) {
   });
 
   if (!xmlResponse.ok) {
-    throw new Error(`Failed to fetch XML: ${xmlResponse.status}`);
+    return { processed: false, reason: `XML fetch failed: ${xmlResponse.status}` };
   }
 
   const xmlContent = await xmlResponse.text();
   
-  // Step 4: Check if it's an ownership document
+  // Step 4: Check if it's an ownership document (THIS is the real Form 4 check)
   if (!xmlContent.includes('ownershipDocument')) {
     return { processed: false, reason: 'Not an ownership document' };
   }
