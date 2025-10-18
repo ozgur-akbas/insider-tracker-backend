@@ -1,7 +1,6 @@
 /**
- * Form 4 XML Parser - Fixed Version
- * Extracts insider trading data from SEC Form 4 XML documents
- * Handles whitespace and newlines properly
+ * Form 4 XML Parser - FIXED VERSION
+ * Handles footnotes in price fields
  */
 
 export function parseForm4XML(xmlText) {
@@ -20,9 +19,9 @@ export function parseForm4XML(xmlText) {
     };
 
     // Extract insider role
-    const isDirector = xmlText.includes('<isDirector>1</isDirector>');
-    const isOfficer = xmlText.includes('<isOfficer>1</isOfficer>');
-    const isTenPercentOwner = xmlText.includes('<isTenPercentOwner>1</isTenPercentOwner>');
+    const isDirector = xmlText.includes('<isDirector>true</isDirector>');
+    const isOfficer = xmlText.includes('<isOfficer>true</isOfficer>');
+    const isTenPercentOwner = xmlText.includes('<isTenPercentOwner>true</isTenPercentOwner>');
     const officerTitle = extractValue(xmlText, '<officerTitle>', '</officerTitle>');
 
     let insiderRole = '';
@@ -49,7 +48,7 @@ export function parseForm4XML(xmlText) {
       while ((txnMatch = transactionRegex.exec(tableXML)) !== null) {
         const txnXML = txnMatch[1];
         
-        // Extract values with flexible whitespace handling
+        // Extract values - FIXED to handle footnotes
         const shares = parseFloat(extractNestedValue(txnXML, 'transactionShares')) || 0;
         const pricePerShare = parseFloat(extractNestedValue(txnXML, 'transactionPricePerShare')) || 0;
         const date = extractNestedValue(txnXML, 'transactionDate');
@@ -75,8 +74,8 @@ export function parseForm4XML(xmlText) {
           isPurchase = true;
         }
 
-        // Only include meaningful transactions
-        if (shares > 0 && pricePerShare > 0 && date) {
+        // Include transactions with shares > 0 (price can be 0 for grants)
+        if (shares > 0 && date) {
           transactions.push({
             date,
             type,
@@ -121,17 +120,21 @@ function extractValue(xml, startTag, endTag) {
 
 /**
  * Extract value from nested <tagName><value>content</value></tagName> structure
- * Handles whitespace and newlines between tags
+ * FIXED: Now handles optional footnoteId elements
  */
 function extractNestedValue(xml, tagName) {
-  // Create regex pattern that matches: <tagName>...whitespace...<value>content</value>...whitespace...</tagName>
-  const pattern = new RegExp(`<${tagName}[^>]*>\\s*<value>([^<]*)</value>\\s*</${tagName}>`, 'i');
+  // Pattern that matches <tagName>...<value>content</value>...</tagName>
+  // Allows any content between tagName and value tags (including footnotes)
+  const pattern = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)</${tagName}>`, 'i');
   const match = xml.match(pattern);
   
   if (match && match[1]) {
-    return match[1].trim();
+    // Now extract the <value> tag from within
+    const valueMatch = match[1].match(/<value>([^<]*)<\/value>/);
+    if (valueMatch && valueMatch[1]) {
+      return valueMatch[1].trim();
+    }
   }
   
   return '';
 }
-
